@@ -158,6 +158,15 @@ class PacbotAgent:
                     queue.append((newRow, newCol, path + [dirName]))
 
         return bestPath
+    
+    # this will be similar to findSafePathToPellet but instead of pellets,
+    # it's going to search for a path to the fruit
+    def findPathToFruit(self, startRow, startCol, fruitRow, fruitCol):
+        from collections import deque
+        visited = set()
+        queue = deque([(startRow, startCol, [])])
+        bestPath = None
+
 
     def act(self):
         if self.state.gameMode == GameModes.PAUSED:
@@ -193,7 +202,7 @@ class PacbotAgent:
             elif ghostDistance <= 10:
                 # check distance between ghost and nearest pellet
                 minPelletDistance = float('inf')
-                for pellet in self.tmp_state.pellets:
+                for pellet in self.tmp_state.pellets[:]: # prevent modifying a list while iterating over it
                     pelletDistance = self.manhattanDistance(pacManRow, pacManCol, pellet.row, pellet.col)
                     if pelletDistance < minPelletDistance:
                         minPelletDistance = pelletDistance  
