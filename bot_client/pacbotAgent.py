@@ -49,14 +49,6 @@ class PacbotAgent:
         return deg
 
     def corridorEntranceAndLen(self, row, col, max_len=100):
-        """
-        Walk from (row, col) outwards until reaching a junction (degree > 2)
-        or exceeding max_len. Returns a tuple (entrance_row, entrance_col, length)
-        where length is how many steps from the original cell to the entrance.
-        If the cell is not inside a corridor/dead-end (degree > 2), length will
-        be 0 and entrance will be the same cell.
-        """
-        # If the starting cell is a junction, it's not a dead-end/corridor
         if self.degreeAt(row, col) > 2:
             return (row, col, 0)
 
@@ -100,65 +92,109 @@ class PacbotAgent:
         return legal
     
     def findSafePathToPellet(self, startRow, startCol):
-        from collections import deque
-        visited = set()
-        queue = deque([(startRow, startCol, [])])
-        bestPath = None
-        bestScore = float('inf')
+        """
+        Find a reasonably safe path to some pellet, using a
+        risk-aware Dijkstra-style search.
 
-        while queue:
-            currentRow, currentCol, path = queue.popleft()
+        Returns a list of Directions (like before) or None.
+        """
 
-            if (currentRow, currentCol) in visited:
+        import heapq
+
+        start = (startRow, startCol)
+
+        # Priority queue items: (cost_so_far, row, col, path_as_dirs)
+        open_heap: list[tuple[float, int, int, list[Directions]]] = []
+        heapq.heappush(open_heap, (0.0, startRow, startCol, []))
+
+        # Best known cost to reach each cell
+        best_cost: dict[tuple[int, int], float] = {start: 0.0}
+
+        bestPath: list[Directions] | None = None
+        bestScore: float = float("inf")
+
+        while open_heap:
+            cost, row, col, path = heapq.heappop(open_heap)
+            pos = (row, col)
+
+            # If we already found a cheaper way to this cell, skip this entry
+            if cost > best_cost.get(pos, float("inf")):
                 continue
-            visited.add((currentRow, currentCol))
 
-            if self.tmp_state.PelletAt(currentRow, currentCol):
-                distance = len(path)
-                danger = self.dangerCost(currentRow, currentCol)
+            # --- Goal check: current cell has a pellet ---
+            if self.tmp_state.PelletAt(row, col):
+                # corridor / dead-end analysis at this pellet
+                entranceRow, entranceCol, corridor_len = self.corridorEntranceAndLen(
+                    row, col
+                )
 
-                # Dead-end / corridor detection: find entrance and corridor length
-                entranceRow, entranceCol, corridor_len = self.corridorEntranceAndLen(currentRow, currentCol)
-
-                # If pellet is in a dead-end (corridor_len > 0), check ghost proximity
                 dead_end_penalty = 0
                 if corridor_len > 0:
-                    # Distance for Pacman to entrance is distance - corridor_len
-                    pac_to_entrance = max(0, distance - corridor_len)
+                    # Pacman steps from entrance into the corridor
+                    pac_to_entrance = max(0, len(path) - corridor_len)
 
-                    # Find closest non-frightened ghost distance to the entrance
-                    nonFrightened = [g for g in self.tmp_state.ghosts if not g.isFrightened()]
-                    ghost_to_entrance = float('inf')
+                    nonFrightened = [
+                        g for g in self.tmp_state.ghosts if not g.isFrightened()
+                    ]
+                    ghost_to_entrance = float("inf")
                     for ghost in nonFrightened:
-                        gd = self.manhattanDistance(ghost.location.row, ghost.location.col, entranceRow, entranceCol)
-                        if gd < ghost_to_entrance:
-                            ghost_to_entrance = gd
+                        gd = self.manhattanDistance(
+                            ghost.location.row,
+                            ghost.location.col,
+                            entranceRow,
+                            entranceCol,
+                        )
+                        ghost_to_entrance = min(ghost_to_entrance, gd)
 
-                    # If a ghost can reach the entrance faster (or nearly as fast) as Pacman,
-                    # heavily penalize this pellet to avoid getting trapped
-                    # Allow some leeway (e.g., 2 ticks) for Pacman to enter/leave
+                    # If the ghost can contest the entrance, treat it as very risky
                     if ghost_to_entrance - pac_to_entrance < 3:
                         dead_end_penalty = 1000
 
-                # higher score means more dangerous and longer path and also probably a dead end penality
-                score = distance + danger * 10 + dead_end_penalty
+                # total score for this pellet path:
+                #   path cost so far + big penalty if it's a scary dead-end
+                score = cost + dead_end_penalty
 
                 if score < bestScore:
                     bestScore = score
                     bestPath = path
-                    # continue searching for an even safer pellet
+                # Keep going; there might be an even better pellet elsewhere
+                # (we're not doing a single-target A*, but multi-target search)
+                # so we don't "return" here.
+                # continue
+
+            # --- Expand neighbors ---
+
+            for dirName, dirVector in DIRECTION_VECTORS.items():
+                newRow = row + dirVector[0]
+                newCol = col + dirVector[1]
+                newPos = (newRow, newCol)
+
+                # Must be walkable
+                if self.tmp_state.wallAt(newRow, newCol):
                     continue
 
-            # Expand neighbors in BFS order, but prune obviously dangerous tiles
-            for dirName, dirVector in DIRECTION_VECTORS.items():
-                newRow = currentRow + dirVector[0]
-                newCol = currentCol + dirVector[1]
+                # Base danger at this tile
+                tileDanger = self.dangerCost(newRow, newCol)
 
-                if not self.tmp_state.wallAt(newRow, newCol) and (newRow, newCol) not in visited and self.dangerCost(newRow, newCol) < 50:
-                    queue.append((newRow, newCol, path + [dirName]))
+                # Hard prune VERY dangerous tiles
+                if tileDanger >= 50:
+                    continue
+
+                # Step cost: distance + weighted danger
+                # (tune 0.3 up or down to make Pacbot more or less risk-averse)
+                step_cost = 1.0 + 0.3 * tileDanger
+
+                new_cost = cost + step_cost
+
+                # Only keep this neighbour if we found a cheaper path to it
+                if new_cost < best_cost.get(newPos, float("inf")):
+                    best_cost[newPos] = new_cost
+                    heapq.heappush(
+                        open_heap,
+                        (new_cost, newRow, newCol, path + [dirName]),
+                    )
 
         return bestPath
-    
     # this will be similar to findSafePathToPellet but instead of pellets,
     # it's going to search for a path to the fruit
     def findPathToFruit(self, startRow, startCol, fruitRow, fruitCol):
